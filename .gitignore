@@ -1,0 +1,35 @@
+# Ambientes e credenciais
+.env
+.env.txt
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv/
+
+# Dados locais e execução
+downloads/
+logs/
+*.log
+*.db
+*.sqlite
+*.sqlite3
+
+# Imagens de depuração e screenshots locais
+screenshot_*.png
+*.png
+*.jpg
+*.jpeg
+
+# IDEs e editores
+.vscode/
+.idea/
+*.swp
+*.swo
