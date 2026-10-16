@@ -47,7 +47,8 @@ python robot_job.py --reset-db
 
 2. **Navegação & Filtros**:
    * Acessa a tela `0101060100` (Comercial / Pedidos).
-   * Aplica o filtro de situação `4` (PRODUCAO) e clica no botão `#ConfirmaFiltroS`.
+   * Aplica o filtro estrito: **Data do Pedido = Data Atual (Hoje)** (`#vda_data_i` e `#vda_data_f`) e **Situação = PRODUÇÃO (4)** (`#vda_situacao_id`).
+   * Clica no botão `#ConfirmaFiltroS`.
    * Ordena por Data da Entrega decrescente (`vda_data_entrega DESC`).
 
 3. **Controle Anti-Duplicidade**:

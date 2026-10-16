@@ -114,17 +114,22 @@ class ErpBot:
         if not tem_grade:
             await self.navegar_para_pedidos()
 
-        # Verifica se o filtro de PRODUÇÃO já está ativo na tela
-        ja_filtrado = await self.page.evaluate("""() => {
+        hoje = datetime.now().strftime("%d/%m/%Y")
+
+        # Verifica se o filtro de PRODUÇÃO e a Data de Hoje já estão ativos na tela
+        ja_filtrado = await self.page.evaluate(f"""() => {{
+            const dt_i = document.querySelector('#vda_data_i') ? document.querySelector('#vda_data_i').value : '';
+            const dt_f = document.querySelector('#vda_data_f') ? document.querySelector('#vda_data_f').value : '';
             const aviso = document.querySelector('#eng-aviso');
             const desc = document.querySelector('#filtro_descricao');
             const textoAviso = aviso ? aviso.innerText.toUpperCase() : '';
             const textoDesc = desc ? desc.value.toUpperCase() : '';
-            return textoAviso.includes('PRODUCAO') || textoDesc.includes('PRODUCAO');
-        }""")
+            const temProducao = textoAviso.includes('PRODUCAO') || textoDesc.includes('PRODUCAO');
+            return temProducao && dt_i === '{hoje}' && dt_f === '{hoje}';
+        }}""")
 
         if ja_filtrado and tem_grade:
-            logging.info("Filtro de PRODUÇÃO já está ativo. Atualizando grade e ordenação...")
+            logging.info(f"Filtro de PRODUÇÃO para a data de hoje ({hoje}) já está ativo. Atualizando grade e ordenação...")
             await self.page.evaluate("""() => {
                 $('#order_by').val('vda_data_entrega DESC');
                 EngNavegacao.refresh();
@@ -132,8 +137,8 @@ class ErpBot:
             await asyncio.sleep(2)
             return
 
-        # Se não está filtrado por PRODUÇÃO:
-        logging.info("Filtro de PRODUÇÃO não está ativo. Configurando filtro...")
+        # Configura filtro: Data do Pedido (Hoje) + Situação (PRODUÇÃO)
+        logging.info(f"Configurando filtro: Data do Pedido = {hoje} e Situação = PRODUÇÃO (4)...")
         situacao_select = await self.page.query_selector("#vda_situacao_id")
         if not situacao_select:
             pesquisar_btn = await self.page.query_selector("#Pesquisar")
@@ -143,12 +148,25 @@ class ErpBot:
                 await asyncio.sleep(1)
 
         await self.page.wait_for_selector("#vda_situacao_id", timeout=15000)
-        await self.page.select_option("#vda_situacao_id", "4")
+        
+        # Preenche Data Inicial/Final como hoje e seleciona situação 4 (PRODUÇÃO)
+        await self.page.evaluate(f"""() => {{
+            if (document.querySelector('#vda_data_entrega_i')) document.querySelector('#vda_data_entrega_i').value = '';
+            if (document.querySelector('#vda_data_entrega_f')) document.querySelector('#vda_data_entrega_f').value = '';
+            if (document.querySelector('#vda_data_i')) document.querySelector('#vda_data_i').value = '{hoje}';
+            if (document.querySelector('#vda_data_f')) document.querySelector('#vda_data_f').value = '{hoje}';
+            
+            const sel = document.querySelector('#vda_situacao_id');
+            if (sel) {{
+                Array.from(sel.options).forEach(opt => {{
+                    opt.selected = (opt.value === '4');
+                }});
+            }}
+        }}""")
         
         logging.info("Clicando em #ConfirmaFiltroS...")
         await self.page.click("#ConfirmaFiltroS")
-        await self.page.wait_for_selector("table tbody tr[id^='tr_']", timeout=15000)
-        await asyncio.sleep(1)
+        await asyncio.sleep(2)
 
         logging.info("Aplicando ordenação vda_data_entrega DESC...")
         await self.page.evaluate("""() => {
