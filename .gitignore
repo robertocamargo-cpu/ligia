@@ -27,6 +27,8 @@ screenshot_*.png
 *.png
 *.jpg
 *.jpeg
+*.html
+*.json
 
 # IDEs e editores
 .vscode/
