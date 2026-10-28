@@ -17,7 +17,7 @@ load_dotenv(dotenv_path=".env", override=True)
 USER = os.getenv("ERP_USER", "")
 PASS = os.getenv("ERP_PASS", "")
 BASE_URL = os.getenv("ERP_URL", "https://erp.admsis.com/")
-POLL_INTERVAL = int(os.getenv("POLL_INTERVAL_SECONDS", "120"))
+POLL_INTERVAL = int(os.getenv("POLL_INTERVAL_SECONDS", "300"))
 HEADLESS = os.getenv("HEADLESS", "true").lower() in ("true", "1", "yes")
 DRY_RUN_DEFAULT = os.getenv("DRY_RUN", "false").lower() in ("true", "1", "yes")
 

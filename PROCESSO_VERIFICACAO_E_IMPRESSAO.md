@@ -11,7 +11,7 @@ O **LigIA** é um assistente autônomo desenvolvido em **Python**, que utiliza o
 ```
        +-------------------------------------------------+
        |               Ciclo Contínuo (Polling)          |
-       |                   A cada 120s                   |
+       |                   A cada 300s (5 min)           |
        +-------------------------------------------------+
                                 |
                                 v
@@ -52,7 +52,7 @@ O **LigIA** é um assistente autônomo desenvolvido em **Python**, que utiliza o
   - `ERP_PASS`: Senha do usuário.
   - `ERP_URL`: Endereço base do sistema (`https://erp.admsis.com/`).
   - `PRINTER_NAME`: Nome da impressora configurada (`HP LaserJet Professional P1102` ou padrão do Windows).
-  - `POLL_INTERVAL_SECONDS`: Intervalo entre cada varredura (120 segundos).
+  - `POLL_INTERVAL_SECONDS`: Intervalo entre cada varredura (300 segundos = 5 minutos).
   - `HEADLESS`: Modo de execução do navegador (`true` = em segundo plano).
   - `DRY_RUN`: Modo de teste/simulação (`false` = imprime na impressora física; `true` = apenas baixa o PDF).
 - Inicializa a conexão com o banco de dados SQLite local [`pedidos_impressos.db`](file:///c:/Users/Alessandra/Documents/assistente%20LigIA/pedidos_impressos.db) através do módulo [`storage.py`](file:///c:/Users/Alessandra/Documents/assistente%20LigIA/storage.py).
@@ -141,8 +141,8 @@ O **LigIA** é um assistente autônomo desenvolvido em **Python**, que utiliza o
 ### 9. Repetição Contínua do Ciclo (Polling)
 - Finalizada a lista de novos pedidos:
   - O robô retorna para a tela da grade de pedidos.
-  - Entra em estado de espera pelo tempo definido em `POLL_INTERVAL_SECONDS` (120 segundos).
-  - Após os 2 minutos, repete todo o ciclo de verificação automaticamente.
+  - Entra em estado de espera pelo tempo definido em `POLL_INTERVAL_SECONDS` (300 segundos / 5 minutos).
+  - Após os 5 minutos, repete todo o ciclo de verificação automaticamente.
 
 ---
 

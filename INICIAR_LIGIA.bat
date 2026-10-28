@@ -5,7 +5,7 @@ cd /d "%~dp0"
 echo ========================================================
 echo         ASSISTENTE LIGIA - IMPRESSAO AUTOMATICA
 echo ========================================================
-echo  Status: Em execucao (Checagem a cada 2 minutos)
+echo  Status: Em execucao (Checagem a cada 5 minutos)
 echo  Para pausar ou encerrar, basta fechar esta janela.
 echo ========================================================
 echo.

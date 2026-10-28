@@ -14,7 +14,7 @@ Ou pelo terminal:
 ```powershell
 python robot_job.py
 ```
-O robô executará uma checagem inicial e repetirá a cada **2 minutos** (configurável).
+O robô executará uma checagem inicial e repetirá a cada **5 minutos (300s)** (configurável).
 
 ### 2. Testar sem Imprimir Folhas Físicas (Modo Simulação)
 Para validar o fluxo sem gastar papel:
