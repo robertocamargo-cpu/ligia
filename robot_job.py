@@ -3,7 +3,7 @@ import os
 import sys
 import base64
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from playwright.async_api import async_playwright
 
@@ -12,13 +12,14 @@ import printer_service
 
 # Carrega variáveis de ambiente
 load_dotenv(dotenv_path=".env.txt")
-load_dotenv(dotenv_path=".env")
+load_dotenv(dotenv_path=".env", override=True)
 
 USER = os.getenv("ERP_USER", "")
 PASS = os.getenv("ERP_PASS", "")
 BASE_URL = os.getenv("ERP_URL", "https://erp.admsis.com/")
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL_SECONDS", "120"))
 HEADLESS = os.getenv("HEADLESS", "true").lower() in ("true", "1", "yes")
+DRY_RUN_DEFAULT = os.getenv("DRY_RUN", "false").lower() in ("true", "1", "yes")
 
 # Configuração de Logging
 os.makedirs("logs", exist_ok=True)
@@ -32,6 +33,31 @@ logging.basicConfig(
         logging.StreamHandler(sys.stdout)
     ]
 )
+
+def calcular_intervalo_datas():
+    """
+    Calcula a Data Inicial e Data Final para busca dos pedidos.
+    Regra de negócio:
+    - Sempre busca pedidos de ontem até hoje.
+    - Se hoje for Segunda-feira (weekday == 0), a data inicial recua para Sexta-feira (3 dias atrás).
+    - Se hoje for Domingo (weekday == 6), recua para Sexta-feira (2 dias atrás).
+    - Permite override via variável de ambiente DIAS_RETROATIVOS no .env.
+    """
+    hoje = datetime.now()
+    env_dias = os.getenv("DIAS_RETROATIVOS", os.getenv("LOOKBACK_DAYS", "auto")).strip().lower()
+
+    if env_dias.isdigit():
+        dias = int(env_dias)
+        data_inicial = hoje - timedelta(days=dias)
+    elif hoje.weekday() == 0:  # Segunda-feira -> Sexta-feira
+        data_inicial = hoje - timedelta(days=3)
+    elif hoje.weekday() == 6:  # Domingo -> Sexta-feira
+        data_inicial = hoje - timedelta(days=2)
+    else:  # Terça a Sábado -> Ontem
+        data_inicial = hoje - timedelta(days=1)
+
+    return data_inicial.strftime("%d/%m/%Y"), hoje.strftime("%d/%m/%Y")
+
 
 class ErpBot:
     def __init__(self, headless=HEADLESS, dry_run=False):
@@ -63,8 +89,13 @@ class ErpBot:
     async def is_logged_in(self) -> bool:
         if not self.page:
             return False
-        user_element = await self.page.query_selector("#eng-notificacoes")
-        return user_element is not None
+        return await self.page.evaluate("""() => {
+            const hasLoginInput = !!document.querySelector('#usu_codigo');
+            const hasUserOrMenu = !!document.querySelector('#eng-notificacoes') || 
+                                  document.body.innerText.includes('Olá,') || 
+                                  (document.title && document.title.includes('ADMSIS'));
+            return !hasLoginInput && hasUserOrMenu;
+        }""")
 
     async def login(self):
         logging.info("Realizando login no ERP...")
@@ -83,12 +114,16 @@ class ErpBot:
         await self.page.fill("#usu_codigo", USER)
         await self.page.fill("#usu_senha", PASS)
         
-        await self.page.evaluate("document.querySelector('#frmLogin').submit()")
+        login_btn = await self.page.query_selector("#login, button[type='submit']")
+        if login_btn:
+            await login_btn.click()
+        else:
+            await self.page.evaluate("document.querySelector('#frmLogin').submit()")
         try:
-            await self.page.wait_for_selector("#eng-notificacoes", timeout=15000)
+            await self.page.wait_for_selector("#usu_codigo", state="detached", timeout=15000)
         except Exception:
             pass
-        await asyncio.sleep(1)
+        await asyncio.sleep(2)
 
         if not await self.is_logged_in():
             alerta = await self.page.evaluate("""() => {
@@ -106,124 +141,135 @@ class ErpBot:
 
     async def aplicar_filtro_producao(self):
         """Verifica se o filtro de PRODUÇÃO já está ativo ou aplica caso necessário."""
-        current_url = self.page.url
-        if "eng_tela=0101060100" not in current_url:
-            await self.navegar_para_pedidos()
+        dt_inicio, dt_fim = calcular_intervalo_datas()
+        logging.info(f"Configurando filtro: Data do Pedido = {dt_inicio} até {dt_fim} e Situação = PRODUÇÃO (4)...")
 
-        tem_grade = await self.page.query_selector("table tbody tr[id^='tr_']")
-        if not tem_grade:
-            await self.navegar_para_pedidos()
-
-        hoje = datetime.now().strftime("%d/%m/%Y")
-
-        # Verifica se o filtro de PRODUÇÃO e a Data de Hoje já estão ativos na tela
-        ja_filtrado = await self.page.evaluate(f"""() => {{
-            const dt_i = document.querySelector('#vda_data_i') ? document.querySelector('#vda_data_i').value : '';
-            const dt_f = document.querySelector('#vda_data_f') ? document.querySelector('#vda_data_f').value : '';
-            const aviso = document.querySelector('#eng-aviso');
-            const desc = document.querySelector('#filtro_descricao');
-            const textoAviso = aviso ? aviso.innerText.toUpperCase() : '';
-            const textoDesc = desc ? desc.value.toUpperCase() : '';
-            const temProducao = textoAviso.includes('PRODUCAO') || textoDesc.includes('PRODUCAO');
-            return temProducao && dt_i === '{hoje}' && dt_f === '{hoje}';
-        }}""")
-
-        if ja_filtrado and tem_grade:
-            logging.info(f"Filtro de PRODUÇÃO para a data de hoje ({hoje}) já está ativo. Atualizando grade e ordenação...")
-            await self.page.evaluate("""() => {
-                $('#order_by').val('vda_data_entrega DESC');
-                EngNavegacao.refresh();
-            }""")
-            await asyncio.sleep(2)
-            return
-
-        # Configura filtro: Data do Pedido (Hoje) + Situação (PRODUÇÃO)
-        logging.info(f"Configurando filtro: Data do Pedido = {hoje} e Situação = PRODUÇÃO (4)...")
-        situacao_select = await self.page.query_selector("#vda_situacao_id")
-        if not situacao_select:
-            pesquisar_btn = await self.page.query_selector("#Pesquisar")
-            if pesquisar_btn:
-                logging.info("Clicando em #Pesquisar para exibir campos de filtro...")
-                await self.page.click("#Pesquisar")
-                await asyncio.sleep(1)
-
-        await self.page.wait_for_selector("#vda_situacao_id", timeout=15000)
-        
-        # Preenche Data Inicial/Final como hoje e seleciona situação 4 (PRODUÇÃO)
+        # Preenche filtros compatíveis com UI moderna e legado
         await self.page.evaluate(f"""() => {{
-            if (document.querySelector('#vda_data_entrega_i')) document.querySelector('#vda_data_entrega_i').value = '';
-            if (document.querySelector('#vda_data_entrega_f')) document.querySelector('#vda_data_entrega_f').value = '';
-            if (document.querySelector('#vda_data_i')) document.querySelector('#vda_data_i').value = '{hoje}';
-            if (document.querySelector('#vda_data_f')) document.querySelector('#vda_data_f').value = '{hoje}';
-            
-            const sel = document.querySelector('#vda_situacao_id');
+            // Campos de Data Inicial / Final
+            const dt_i = document.querySelector('[name="vda_data"], #vda_data_i, #t101060100-filtro-vda_data');
+            if (dt_i) dt_i.value = '{dt_inicio}';
+
+            const dt_f = document.querySelector('[name="vda_data-f"], #vda_data_f, #t101060100-filtro-vda_data-f');
+            if (dt_f) dt_f.value = '{dt_fim}';
+
+            // Limpa data de entrega se houver
+            const dte_i = document.querySelector('#vda_data_entrega_i, #t101060100-filtro-vda_data_entrega');
+            if (dte_i) dte_i.value = '';
+            const dte_f = document.querySelector('#vda_data_entrega_f, #t101060100-filtro-vda_data_entrega-f');
+            if (dte_f) dte_f.value = '';
+
+            // Situação = 4 (PRODUÇÃO)
+            const sel = document.querySelector('[name="vda_situacao_id"], #vda_situacao_id, #t101060100-filtro-vda_situacao_id');
             if (sel) {{
+                sel.value = '4';
                 Array.from(sel.options).forEach(opt => {{
                     opt.selected = (opt.value === '4');
                 }});
             }}
         }}""")
-        
-        logging.info("Clicando em #ConfirmaFiltroS...")
-        await self.page.click("#ConfirmaFiltroS")
-        await asyncio.sleep(2)
 
-        logging.info("Aplicando ordenação vda_data_entrega DESC...")
-        await self.page.evaluate("""() => {
-            $('#order_by').val('vda_data_entrega DESC');
-            EngNavegacao.refresh();
-        }""")
-        await asyncio.sleep(2)
+        # Clica no botão de Filtrar
+        filtrar_btn = await self.page.query_selector("button:has-text('Filtrar'), input[value='Filtrar'], #ConfirmaFiltroS")
+        if filtrar_btn:
+            logging.info("Clicando no botão Filtrar...")
+            await filtrar_btn.click()
+            await asyncio.sleep(3)
 
     async def obter_pedidos_grade(self):
-        """Extrai os pedidos da tabela visível."""
-        return await self.page.evaluate("""() => {
+        """Extrai os pedidos da tabela visível (compatível com UI moderna e legado)."""
+        pedidos = await self.page.evaluate("""() => {
             const list = [];
-            const rows = document.querySelectorAll("table tbody tr[id^='tr_']");
+            // UI moderna (data-eng-linha) ou legado (tr[id^='tr_'])
+            const rows = document.querySelectorAll("table tbody tr[data-eng-linha], table tbody tr[id^='tr_']");
             rows.forEach(tr => {
-                const link = tr.querySelector("a[href*='EngNavegacao.selecionar']");
-                const ref = tr.querySelector("input[name^='vda_referencia_']");
-                const cliente = tr.querySelector("input[name^='vda_cliente_id_']");
-                const clienteLabel = tr.querySelector("td[id*='vda_cliente_id'] a");
-                const dataEntrega = tr.querySelector("input[name^='vda_data_entrega_']");
-                const totalPedido = tr.querySelector("input[name^='vda_total_pedido_']");
-                
-                if (link) {
-                    const match = link.getAttribute('href').match(/selecionar\\('(\\d+)'\\)/);
-                    if (match) {
-                        list.push({
-                            vda_id: match[1],
-                            referencia: ref ? ref.value : '',
-                            cliente: clienteLabel ? clienteLabel.innerText.trim() : (cliente ? cliente.value : ''),
-                            data_entrega: dataEntrega ? dataEntrega.value : '',
-                            total: totalPedido ? totalPedido.value : ''
-                        });
-                    }
+                const vdaIdAttr = tr.getAttribute('data-eng-linha');
+                const link = tr.querySelector("a[href*='selecionar'], a[href*='/tela/101060100/']");
+                let vda_id = vdaIdAttr || '';
+                if (!vda_id && link) {
+                    const matchHref = link.getAttribute('href').match(/(\\d+)/);
+                    if (matchHref) vda_id = matchHref[1];
                 }
+
+                if (!vda_id) return;
+
+                // Referência
+                const refTd = tr.querySelector("[data-eng-coluna='vda_referencia']");
+                const refInput = tr.querySelector("input[name^='vda_referencia_']");
+                const ref = refTd ? (refTd.getAttribute('data-eng-valor') || refTd.innerText.trim()) : (refInput ? refInput.value : '');
+
+                // Cliente
+                const cliTd = tr.querySelector("[data-eng-coluna='vda_cliente_id']");
+                const cliInput = tr.querySelector("input[name^='vda_cliente_id_']");
+                const cliente = cliTd ? (cliTd.getAttribute('data-eng-valor') || cliTd.innerText.trim()) : (cliInput ? cliInput.value : '');
+
+                // Data de Entrega
+                const dtEntTd = tr.querySelector("[data-eng-coluna='vda_data_entrega']");
+                const dtEntInput = tr.querySelector("input[name^='vda_data_entrega_']");
+                const dataEntrega = dtEntTd ? (dtEntTd.getAttribute('data-eng-valor') || dtEntTd.innerText.trim()) : (dtEntInput ? dtEntInput.value : '');
+
+                // Total Pedido
+                const totTd = tr.querySelector("[data-eng-coluna='vda_total_pedido']");
+                const totInput = tr.querySelector("input[name^='vda_total_pedido_']");
+                const total = totTd ? (totTd.getAttribute('data-eng-valor') || totTd.innerText.trim()) : (totInput ? totInput.value : '');
+
+                list.push({
+                    vda_id: String(vda_id),
+                    referencia: ref,
+                    cliente: cliente,
+                    data_entrega: dataEntrega,
+                    total: total
+                });
             });
             return list;
         }""")
 
+        # Ordena pedidos por Data da Entrega DESC
+        def parse_data(p):
+            dt_str = p.get("data_entrega", "")
+            if dt_str and "/" in dt_str:
+                try:
+                    return datetime.strptime(dt_str.strip(), "%d/%m/%Y")
+                except Exception:
+                    pass
+            return datetime.min
+
+        pedidos.sort(key=parse_data, reverse=True)
+        return pedidos
+
     async def baixar_pdf_pedido(self, vda_id: str) -> bytes:
-        """Gera e baixa o PDF do pedido no contexto autenticado."""
+        """Gera e baixa o PDF do pedido no contexto autenticado (UI moderna e legado)."""
+        # 1. Verifica se foi aberto modal com link/iframe de PDF (UI moderna)
+        try:
+            await self.page.wait_for_selector("[data-eng-pdf], a[href*='/relatorio/202/'], iframe[src*='/relatorio/202/']", state="attached", timeout=6000)
+            pdf_rel_path = await self.page.evaluate("""() => {
+                const el = document.querySelector('[data-eng-pdf]');
+                if (el) return el.getAttribute('data-eng-pdf');
+                const a = document.querySelector('a[href*="/relatorio/202/"]');
+                if (a) return a.getAttribute('href');
+                const iframe = document.querySelector('iframe[src*="/relatorio/202/"]');
+                return iframe ? iframe.getAttribute('src') : null;
+            }""")
+            if pdf_rel_path:
+                pdf_url = pdf_rel_path if pdf_rel_path.startswith("http") else f"{BASE_URL.rstrip('/')}{pdf_rel_path}"
+                logging.info(f"Baixando PDF via endpoint do relatório: {pdf_url}")
+                res = await self.page.request.get(pdf_url)
+                return await res.body()
+        except Exception:
+            pass
+
+        # 2. Fallback para formulário legado (EngRelatorio/Pdf/202)
         pdf_b64 = await self.page.evaluate("""async () => {
             const form = document.querySelector('#Formulario');
+            if (!form) return null;
             const uuid = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
                 var r = Math.random() * 16 | 0, v = c == 'x' ? r : (r & 0x3 | 0x8);
                 return v.toString(16);
             });
             const url = 'EngRelatorio/Pdf/202?requestID=' + uuid;
             const formData = new FormData(form);
-            
-            const response = await fetch(url, {
-                method: 'POST',
-                body: formData
-            });
-            
-            if (!response.ok) {
-                throw new Error('HTTP ' + response.status + ' ao gerar relatório.');
-            }
-            
+            const response = await fetch(url, { method: 'POST', body: formData });
+            if (!response.ok) return null;
             const buffer = await response.arrayBuffer();
             let binary = '';
             const bytes = new Uint8Array(buffer);
@@ -232,7 +278,9 @@ class ErpBot:
             }
             return btoa(binary);
         }""")
-        return base64.b64decode(pdf_b64)
+        if pdf_b64:
+            return base64.b64decode(pdf_b64)
+        return None
 
     async def processar_pedido(self, pedido: dict):
         vda_id = pedido["vda_id"]
@@ -242,21 +290,27 @@ class ErpBot:
 
         logging.info(f"==> Processando NOVO PEDIDO: ID={vda_id} | Ref={ref} | Entrega={data_entrega} | Cliente={cliente}")
 
-        # 1. Abre a ficha do pedido com segurança
-        await self.page.evaluate(f"EngNavegacao.selecionar('{vda_id}');")
-        
-        # Aguarda botão de impressão estar presente e pronto
-        await self.page.wait_for_selector("#btImpressao", timeout=15000)
+        # 1. Abre a ficha do pedido (compatível com URL direta e EngNavegacao)
+        await self.page.goto(f"{BASE_URL}tela/101060100/{vda_id}", wait_until="domcontentloaded")
+        await asyncio.sleep(2)
+
+        # 2. Localiza e clica no botão de Impressão (Impr. ou #btImpressao)
+        impr_btn = await self.page.query_selector("button[data-eng-acao='btImpressao'], button:has-text('Impr.'), #btImpressao")
+        if not impr_btn:
+            logging.error(f"Botão de impressão não encontrado para o pedido {vda_id}.")
+            return False
+
+        await impr_btn.click()
         await asyncio.sleep(1)
 
-        # 2. Baixa o PDF
+        # 3. Baixa o PDF
         pdf_bytes = await self.baixar_pdf_pedido(vda_id)
         if not pdf_bytes or not pdf_bytes.startswith(b"%PDF"):
             logging.error(f"Falha ao obter PDF válido para o pedido {vda_id}.")
             return False
 
-        safe_ref = ref.replace("/", "-").replace("\\", "-")
-        pdf_filename = f"pedido_{vda_id}_{safe_ref}.pdf"
+        safe_ref = ref.replace("/", "-").replace("\\", "-").strip()
+        pdf_filename = f"pedido_{vda_id}_{safe_ref}.pdf" if safe_ref else f"pedido_{vda_id}.pdf"
         pdf_filepath = os.path.abspath(os.path.join("downloads", pdf_filename))
 
         with open(pdf_filepath, "wb") as f:
@@ -273,14 +327,17 @@ class ErpBot:
 
         # 4. Registra no banco de dados SQLite para evitar duplicidade
         if sucesso_impressao:
-            storage.registrar_pedido_impresso(
-                vda_id=vda_id,
-                referencia=ref,
-                cliente=cliente,
-                data_entrega=data_entrega,
-                arquivo_pdf=pdf_filepath
-            )
-            logging.info(f"Pedido {vda_id} ({ref}) registrado no histórico de impressões!")
+            if not self.dry_run:
+                storage.registrar_pedido_impresso(
+                    vda_id=vda_id,
+                    referencia=ref,
+                    cliente=cliente,
+                    data_entrega=data_entrega,
+                    arquivo_pdf=pdf_filepath
+                )
+                logging.info(f"Pedido {vda_id} ({ref}) registrado no histórico de impressões!")
+            else:
+                logging.info(f"[DRY-RUN] Pedido {vda_id} ({ref}) simulado com sucesso (não gravado no histórico para permitir impressão real futura).")
             return True
         else:
             logging.error(f"Falha no envio do pedido {vda_id} para a impressora.")
@@ -337,7 +394,9 @@ async def main():
     import argparse
     parser = argparse.ArgumentParser(description="Job de Impressão Automática de Pedidos ERP ADMSIS")
     parser.add_argument("--once", action="store_true", help="Executa apenas um ciclo e encerra")
-    parser.add_argument("--dry-run", action="store_true", help="Executa sem enviar para a impressora física (modo simulação)")
+    parser.add_argument("--dry-run", dest="dry_run", action="store_true", help="Executa sem enviar para a impressora física (modo simulação)")
+    parser.add_argument("--no-dry-run", dest="dry_run", action="store_false", help="Desativa modo simulação")
+    parser.set_defaults(dry_run=DRY_RUN_DEFAULT)
     parser.add_argument("--reset-db", action="store_true", help="Limpa o banco de dados de pedidos já impressos")
     parser.add_argument("--interval", type=int, default=POLL_INTERVAL, help="Intervalo em segundos entre checagens")
     args = parser.parse_args()
